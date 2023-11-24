@@ -1,4 +1,4 @@
-clarifai==9.10.0
+clarifai==9.10.2
 langchain==0.0.340
 pypdf==3.17.1
 streamlit==1.28.2
