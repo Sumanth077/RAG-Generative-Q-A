@@ -1,53 +1,95 @@
 import streamlit as st
-from clarifai.client.auth import create_stub
-from clarifai.client.auth.helper import ClarifaiAuthHelper
-from clarifai.client.user import User
+import tempfile
+import os
+from langchain.document_loaders import PyPDFLoader
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.vectorstores import Clarifai
+from langchain.chains import RetrievalQA
 from clarifai.modules.css import ClarifaiStreamlitCSS
-from google.protobuf import json_format, timestamp_pb2
 
-st.set_page_config(layout="wide")
+st.set_page_config(page_title="Chat with Documents", page_icon="🦜")
+st.title("🦜 RAG with Clarifai and Langchain")
+
 ClarifaiStreamlitCSS.insert_default_css(st)
 
-# This must be within the display() function.
-auth = ClarifaiAuthHelper.from_streamlit(st)
-stub = create_stub(auth)
-userDataObject = auth.get_user_app_id_proto()
+@st.cache_resource(ttl="1h")
+def load_chunk_pdf(uploaded_files):
+    # Read documents
+    documents = []
+    temp_dir = tempfile.TemporaryDirectory()
+    for file in uploaded_files:
+        temp_filepath = os.path.join(temp_dir.name, file.name)
+        with open(temp_filepath, "wb") as f:
+            f.write(file.getvalue())
+        loader = PyPDFLoader(temp_filepath)
+        documents.extend(loader.load())
 
-st.title("Simple example to list inputs")
+    text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+    chunked_documents = text_splitter.split_documents(documents)
+    return chunked_documents
 
-with st.form(key="data-inputs"):
-  mtotal = st.number_input(
-      "Select number of inputs to view in a table:", min_value=5, max_value=100)
-  submitted = st.form_submit_button('Submit')
-
-if submitted:
-  if mtotal is None or mtotal == 0:
-    st.warning("Number of inputs must be provided.")
-    st.stop()
-  else:
-    st.write("Number of inputs in table will be: {}".format(mtotal))
-
-  # Stream inputs from the app. list_inputs give list of dictionaries with inputs and its metadata .
-  input_obj = User(user_id=userDataObject.user_id).app(app_id=userDataObject.app_id).inputs()
-  all_inputs = input_obj.list_inputs()
-
-  #Check for no of inputs in the app and compare it with no of inputs to be displayed.
-  if len(all_inputs) < (mtotal):
-    raise Exception(
-        f"No of inputs is less than {mtotal}. Please add more inputs or reduce the inputs to be displayed !"
+def vectorstore(USER_ID, APP_ID, docs, CLARIFAI_PAT):
+    clarifai_vector_db = Clarifai.from_documents(
+        user_id=USER_ID,
+        app_id=APP_ID,
+        documents=docs,
+        pat=CLARIFAI_PAT,
+        number_of_docs=3,
     )
+    return clarifai_vector_db
 
-  else:
-    data = []
-    #added "data_url" which gives the url of the input.
-    for inp in range(mtotal):
-      data.append({
-          "id": all_inputs[inp].id,
-          "data_url": all_inputs[inp].data.image.url,
-          "status": all_inputs[inp].status.description,
-          "created_at": timestamp_pb2.Timestamp.ToDatetime(all_inputs[inp].created_at),
-          "modified_at": timestamp_pb2.Timestamp.ToDatetime(all_inputs[inp].modified_at),
-          "metadata": json_format.MessageToDict(all_inputs[inp].data.metadata),
-      })
 
-  st.dataframe(data)
+def QandA(CLARIFAI_PAT, clarifai_vector_db):
+    from langchain.llms import Clarifai
+    USER_ID = "openai"
+    APP_ID = "chat-completion"
+    MODEL_ID = "GPT-4"
+
+    # completion llm
+    clarifai_llm = Clarifai(
+        pat=CLARIFAI_PAT, user_id=USER_ID, app_id=APP_ID, model_id=MODEL_ID)
+
+    qa = RetrievalQA.from_chain_type(
+        llm=clarifai_llm,
+        chain_type="stuff",
+        retriever=clarifai_vector_db.as_retriever()
+    )
+    return qa
+
+
+def main():
+    user_question = st.text_input("Ask a question to GPT 3.5 Turbo model about your documents and click on get the response")
+
+    with st.sidebar:
+        st.subheader("Add your Clarifai PAT, USER ID, APP ID along with the documents")
+
+        # Get the USER_ID, APP_ID, Clarifai API Key
+        CLARIFAI_PAT = st.text_input("Clarifai PAT", type="password")
+        USER_ID = st.text_input("Clarifai user id")
+        APP_ID = st.text_input("Clarifai app id")
+
+        uploaded_files = st.file_uploader(
+            "Upload your PDFs here", accept_multiple_files=True)
+
+    if not (CLARIFAI_PAT and USER_ID and APP_ID and uploaded_files):
+        st.info("Please add your Clarifai PAT, USER_ID, APP_ID and upload files to continue.")
+    elif st.button("Get the response"):
+        with st.spinner("Processing"):
+            # process pdfs
+            docs = load_chunk_pdf(uploaded_files)
+
+            # create a vector store
+            clarifai_vector_db = vectorstore(USER_ID, APP_ID, docs, CLARIFAI_PAT)
+
+            # create Q&A chain
+            conversation = QandA(CLARIFAI_PAT, clarifai_vector_db)
+
+            # Ask the question to the GPT 3.5 Turbo model based on the documents
+
+            response = conversation.run(user_question)
+
+            st.write(response)
+
+
+if __name__ == '__main__':
+    main()
